@@ -1,0 +1,10 @@
+torch>=2.0.0
+torchvision>=0.15.0
+tqdm>=4.66.0
+pillow>=9.0.0
+numpy>=1.21.0
+datasets>=2.16.0
+tensorboard>=2.15.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+huggingface_hub>=0.20.0
