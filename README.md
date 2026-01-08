@@ -63,6 +63,36 @@ python train_dit.py --vae_path vae_checkpoints/vae_final.pt --dataset laion/laio
 | XL   | ~700M      | 1152    | 28     | 16    |
 | XXL  | ~1.5B      | 1536    | 32     | 24    |
 
+## Datasets
+
+### VAE Training (images only)
+
+| Dataset | Size | Link |
+|---------|------|------|
+| ImageNet-1K | 1.2M | [huggingface.co/datasets/imagenet-1k](https://huggingface.co/datasets/imagenet-1k) |
+| WikiArt | 80K | [huggingface.co/datasets/huggan/wikiart](https://huggingface.co/datasets/huggan/wikiart) |
+| CelebA-HQ | 30K | [huggingface.co/datasets/huggan/CelebA-HQ](https://huggingface.co/datasets/huggan/CelebA-HQ) |
+| FFHQ | 70K | [huggingface.co/datasets/huggan/FFHQ](https://huggingface.co/datasets/huggan/FFHQ) |
+
+### DiT Training (images + captions)
+
+| Dataset | Size | Link |
+|---------|------|------|
+| LAION-Art | 8M | [huggingface.co/datasets/laion/laion-art](https://huggingface.co/datasets/laion/laion-art) |
+| LAION-Aesthetics | 120M | [huggingface.co/datasets/laion/laion2B-en-aesthetic](https://huggingface.co/datasets/laion/laion2B-en-aesthetic) |
+| Conceptual Captions | 3M | [huggingface.co/datasets/conceptual_captions](https://huggingface.co/datasets/conceptual_captions) |
+| DiffusionDB | 14M | [huggingface.co/datasets/poloclub/diffusiondb](https://huggingface.co/datasets/poloclub/diffusiondb) |
+| JourneyDB | 4M | [huggingface.co/datasets/JourneyDB/JourneyDB](https://huggingface.co/datasets/JourneyDB/JourneyDB) |
+| Pokemon BLIP | 833 | [huggingface.co/datasets/lambdalabs/pokemon-blip-captions](https://huggingface.co/datasets/lambdalabs/pokemon-blip-captions) |
+
+### Large-Scale
+
+| Dataset | Size | Link |
+|---------|------|------|
+| LAION-2B | 2B | [huggingface.co/datasets/laion/laion2B-en](https://huggingface.co/datasets/laion/laion2B-en) |
+| LAION-5B | 5B | [laion.ai/blog/laion-5b](https://laion.ai/blog/laion-5b/) |
+| DataComp | 12B | [github.com/mlfoundations/datacomp](https://github.com/mlfoundations/datacomp) |
+
 ## Usage
 
 ```python
