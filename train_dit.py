@@ -276,6 +276,7 @@ def train_dit(args):
     step = 0
     start_time = time.time()
     total_loss = 0
+    lr = 0.0  # Will be set during warmup
 
     pbar = tqdm(total=MAX_STEPS, desc="Training")
 
