@@ -312,16 +312,19 @@ def train_dit(args):
             loss = loss / GRADIENT_ACCUMULATION
 
             loss.backward()
-            total_loss += loss.item()
+            total_loss += loss.item() * GRADIENT_ACCUMULATION  # Unscale for logging
+            current_loss = loss.item() * GRADIENT_ACCUMULATION
 
+            # Compute gradient norm before clipping
+            grad_norm = 0.0
             if (step + 1) % GRADIENT_ACCUMULATION == 0:
-                torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0).item()
                 optimizer.step()
                 optimizer.zero_grad()
 
                 # Learning rate warmup
                 if step < WARMUP_STEPS:
-                    lr = LEARNING_RATE * step / WARMUP_STEPS
+                    lr = LEARNING_RATE * (step + 1) / WARMUP_STEPS
                 else:
                     lr = LEARNING_RATE
 
@@ -329,17 +332,23 @@ def train_dit(args):
                     param_group["lr"] = lr
 
             step += 1
+
+            # Update progress bar with stats every step
+            pbar.set_postfix({
+                "loss": f"{current_loss:.4f}",
+                "lr": f"{lr:.2e}",
+                "grad": f"{grad_norm:.2f}" if grad_norm > 0 else "acc",
+            })
             pbar.update(1)
 
-            # Logging
+            # TensorBoard logging
             if step % LOG_INTERVAL == 0:
-                avg_loss = total_loss / LOG_INTERVAL * GRADIENT_ACCUMULATION
-                elapsed = time.time() - start_time
-
-                pbar.set_postfix({"loss": f"{avg_loss:.4f}", "lr": f"{lr:.2e}"})
+                avg_loss = total_loss / LOG_INTERVAL
 
                 writer.add_scalar("train/loss", avg_loss, step)
                 writer.add_scalar("train/lr", lr, step)
+                if grad_norm > 0:
+                    writer.add_scalar("train/grad_norm", grad_norm, step)
 
                 total_loss = 0
 
