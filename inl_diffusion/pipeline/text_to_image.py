@@ -443,3 +443,115 @@ class INLDiffusionPipeline:
         if self.text_encoder is not None:
             self.text_encoder.to(device)
         return self
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        vae_path: str,
+        dit_path: str,
+        tokenizer_path: Optional[str] = None,
+        device: str = "cuda",
+        scheduler_type: str = "ddim",
+    ) -> "INLDiffusionPipeline":
+        """
+        Load pipeline from pretrained checkpoints.
+
+        Args:
+            vae_path: Path to VAE checkpoint (.pt or .safetensors)
+            dit_path: Path to DiT checkpoint (.pt or .safetensors)
+            tokenizer_path: Path to INL tokenizer.json (optional)
+            device: Device to run on
+            scheduler_type: "ddpm" or "ddim"
+
+        Returns:
+            Loaded pipeline ready for inference
+        """
+        from ..vae import INLVAE
+        from ..dit import INLDiT
+        from ..tokenizer import INLTokenizer
+
+        # Load VAE
+        print(f"Loading VAE from {vae_path}...")
+        vae_checkpoint = torch.load(vae_path, map_location="cpu")
+        vae_config = vae_checkpoint.get("config", {})
+
+        vae = INLVAE(
+            image_size=vae_config.get("image_size", 256),
+            base_channels=vae_config.get("base_channels", 128),
+            latent_dim=vae_config.get("latent_dim", 4),
+        )
+        vae.load_state_dict(vae_checkpoint["model_state_dict"])
+        vae.eval()
+
+        # Load DiT
+        print(f"Loading DiT from {dit_path}...")
+        dit_checkpoint = torch.load(dit_path, map_location="cpu")
+        dit_config = dit_checkpoint.get("config", {})
+
+        dit = INLDiT.from_config(
+            dit_config.get("dit_size", "L"),
+            img_size=dit_config.get("img_size", 32),
+            patch_size=2,
+            in_channels=dit_config.get("latent_channels", 4),
+            context_dim=2048,
+        )
+        dit.load_state_dict(dit_checkpoint["model_state_dict"])
+        dit.eval()
+
+        # Load tokenizer
+        print(f"Loading INL tokenizer...")
+        tokenizer = INLTokenizer(tokenizer_path=tokenizer_path)
+        vocab_size = tokenizer.get_vocab_size()
+        print(f"Tokenizer vocab size: {vocab_size:,}")
+
+        # Create text encoder
+        # Import here to avoid circular imports
+        import torch.nn as nn
+
+        class INLTextEncoder(nn.Module):
+            def __init__(self, vocab_size: int, d_model: int = 2048, num_layers: int = 6):
+                super().__init__()
+                self.d_model = d_model
+                self.embedding = nn.Embedding(vocab_size, d_model)
+                self.pos_embedding = nn.Parameter(torch.randn(1, 77, d_model) * 0.02)
+                encoder_layer = nn.TransformerEncoderLayer(
+                    d_model=d_model, nhead=8, dim_feedforward=d_model * 4,
+                    batch_first=True, dropout=0.1
+                )
+                self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+                self.ln_final = nn.LayerNorm(d_model)
+
+            def forward(self, input_ids):
+                x = self.embedding(input_ids)
+                x = x + self.pos_embedding[:, :x.size(1)]
+                x = self.encoder(x)
+                return self.ln_final(x)
+
+        text_encoder = INLTextEncoder(vocab_size=vocab_size)
+
+        # Create scheduler
+        if scheduler_type == "ddpm":
+            scheduler = DDPMScheduler(
+                num_train_timesteps=1000,
+                beta_schedule="scaled_linear",
+                prediction_type="epsilon",
+            )
+        else:
+            scheduler = DDIMScheduler(
+                num_train_timesteps=1000,
+                beta_schedule="scaled_linear",
+                prediction_type="epsilon",
+            )
+
+        # Create pipeline
+        pipeline = cls(
+            vae=vae,
+            dit=dit,
+            text_encoder=text_encoder,
+            tokenizer=tokenizer,
+            scheduler=scheduler,
+            device=device,
+        )
+
+        print(f"Pipeline loaded on {device}")
+        return pipeline

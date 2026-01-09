@@ -35,6 +35,7 @@ except ImportError:
 from inl_diffusion.vae import INLVAE
 from inl_diffusion.dit import INLDiT
 from inl_diffusion.pipeline.text_to_image import DDPMScheduler
+from inl_diffusion.tokenizer import INLTokenizer
 
 
 # ============================================================================
@@ -56,6 +57,9 @@ USE_BF16 = os.getenv("USE_BF16", "1") == "1"  # Enable bf16 by default
 # Model
 DIT_SIZE = os.getenv("DIT_SIZE", "L")  # S, B, L, XL, XXL
 
+# Tokenizer
+TOKENIZER_PATH = os.getenv("TOKENIZER_PATH", "checkpoints/tokenizer/tokenizer.json")
+
 # Output
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "dit_checkpoints"))
 
@@ -64,10 +68,15 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "dit_checkpoints"))
 # TEXT ENCODER
 # ============================================================================
 
-class DummyTextEncoder(nn.Module):
-    """Dummy text encoder for testing (replace with INL-LLM or CLIP)."""
+class INLTextEncoder(nn.Module):
+    """
+    INL Text Encoder for diffusion model conditioning.
 
-    def __init__(self, vocab_size: int = 50000, d_model: int = 2048, max_length: int = 77):
+    Uses the INL tokenizer vocabulary (100K tokens) and encodes text
+    into embeddings for cross-attention in DiT.
+    """
+
+    def __init__(self, vocab_size: int = 100000, d_model: int = 2048, max_length: int = 77, num_layers: int = 6):
         super().__init__()
         self.d_model = d_model
         self.max_length = max_length
@@ -75,36 +84,34 @@ class DummyTextEncoder(nn.Module):
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_embedding = nn.Parameter(torch.randn(1, max_length, d_model) * 0.02)
 
-        # Simple transformer layers
+        # Transformer encoder layers
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=8,
             dim_feedforward=d_model * 4,
             batch_first=True,
+            dropout=0.1,
         )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=4)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+
+        # Layer norm for output
+        self.ln_final = nn.LayerNorm(d_model)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Encode token IDs to embeddings.
+
+        Args:
+            input_ids: [B, seq_len] token IDs
+
+        Returns:
+            [B, seq_len, d_model] text embeddings
+        """
         x = self.embedding(input_ids)
         x = x + self.pos_embedding[:, :x.size(1)]
         x = self.encoder(x)
+        x = self.ln_final(x)
         return x
-
-
-class SimpleTokenizer:
-    """Simple tokenizer for testing."""
-
-    def __init__(self, vocab_size: int = 50000):
-        self.vocab_size = vocab_size
-
-    def __call__(self, texts, **kwargs):
-        max_length = kwargs.get("max_length", 77)
-        batch_size = len(texts) if isinstance(texts, list) else 1
-
-        # Random tokens for testing
-        input_ids = torch.randint(0, self.vocab_size, (batch_size, max_length))
-
-        return {"input_ids": input_ids}
 
 
 # ============================================================================
@@ -239,9 +246,15 @@ def train_dit(args):
     ).to(device)
     print(f"DiT Parameters: {dit.get_num_params() / 1e6:.2f}M")
 
-    # Text encoder (placeholder - replace with INL-LLM)
-    text_encoder = DummyTextEncoder(d_model=2048).to(device)
-    tokenizer = SimpleTokenizer()
+    # INL Tokenizer (from Pacific-Prime/pacific-tiny or local)
+    tokenizer_path = args.tokenizer_path if hasattr(args, 'tokenizer_path') and args.tokenizer_path else TOKENIZER_PATH
+    print(f"\nLoading INL tokenizer from {tokenizer_path}...")
+    tokenizer = INLTokenizer(tokenizer_path=tokenizer_path)
+    vocab_size = tokenizer.get_vocab_size()
+    print(f"Tokenizer vocab size: {vocab_size:,}")
+
+    # INL Text Encoder
+    text_encoder = INLTextEncoder(vocab_size=vocab_size, d_model=2048, num_layers=6).to(device)
     print(f"Text encoder: {sum(p.numel() for p in text_encoder.parameters()) / 1e6:.2f}M params")
 
     # Noise scheduler
@@ -522,6 +535,8 @@ def main():
                         help="Learning rate")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit dataset to N samples (faster loading)")
+    parser.add_argument("--tokenizer_path", type=str, default=None,
+                        help="Path to INL tokenizer.json (default: checkpoints/tokenizer/tokenizer.json)")
 
     args = parser.parse_args()
 
