@@ -11,7 +11,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="inl-diffusion",
-    version="0.1.0",
+    version="0.2.0",
     author="Pacific Prime",
     author_email="contact@pacific-prime.ai",
     description="Image generation with Integrator Neurons - Text-to-image diffusion model",
