@@ -72,8 +72,10 @@ class DDPMScheduler:
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
         """Add noise to samples (forward diffusion)."""
-        sqrt_alpha_prod = self.sqrt_alphas_cumprod[timesteps].view(-1, 1, 1, 1).to(original_samples.device)
-        sqrt_one_minus_alpha_prod = self.sqrt_one_minus_alphas_cumprod[timesteps].view(-1, 1, 1, 1).to(original_samples.device)
+        # Index on CPU then move to device
+        timesteps_cpu = timesteps.cpu()
+        sqrt_alpha_prod = self.sqrt_alphas_cumprod[timesteps_cpu].view(-1, 1, 1, 1).to(original_samples.device)
+        sqrt_one_minus_alpha_prod = self.sqrt_one_minus_alphas_cumprod[timesteps_cpu].view(-1, 1, 1, 1).to(original_samples.device)
 
         noisy_samples = sqrt_alpha_prod * original_samples + sqrt_one_minus_alpha_prod * noise
         return noisy_samples
