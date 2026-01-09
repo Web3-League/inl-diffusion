@@ -50,6 +50,8 @@ WARMUP_STEPS = int(os.getenv("WARMUP_STEPS", "5000"))
 SAVE_EVERY = int(os.getenv("SAVE_EVERY", "10000"))
 LOG_INTERVAL = int(os.getenv("LOG_INTERVAL", "100"))
 GRADIENT_ACCUMULATION = int(os.getenv("GRADIENT_ACCUMULATION", "4"))
+CFG_DROPOUT = float(os.getenv("CFG_DROPOUT", "0.1"))  # 10% unconditional training for CFG
+USE_BF16 = os.getenv("USE_BF16", "1") == "1"  # Enable bf16 by default
 
 # Model
 DIT_SIZE = os.getenv("DIT_SIZE", "L")  # S, B, L, XL, XXL
@@ -187,9 +189,15 @@ class TextImageDataset(torch.utils.data.IterableDataset):
 # ============================================================================
 
 def train_dit(args):
-    """Train DiT."""
+    """Train DiT with bf16 mixed precision and CFG support."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Setup bf16 mixed precision
+    use_amp = USE_BF16 and torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    amp_dtype = torch.bfloat16 if use_amp else torch.float32
+    print(f"Mixed precision: {'bf16' if use_amp else 'fp32'}")
 
     # Create output directories
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -303,7 +311,14 @@ def train_dit(args):
     print(f"Batch size: {BATCH_SIZE} (grad accum: {GRADIENT_ACCUMULATION})")
     print(f"Image size: {IMAGE_SIZE} → Latent: {latent_size}x{latent_size}")
     print(f"Max steps: {MAX_STEPS}")
+    print(f"CFG dropout: {CFG_DROPOUT*100:.0f}%")
+    print(f"Mixed precision: {'bf16' if use_amp else 'fp32'}")
     print(f"{'='*60}\n")
+
+    # Create null text embedding for CFG (unconditional)
+    with torch.no_grad():
+        null_tokens = torch.zeros(1, 77, dtype=torch.long, device=device)
+        null_text_embedding = text_encoder(null_tokens)  # [1, 77, 2048]
 
     step = 0
     start_time = time.time()
@@ -319,14 +334,28 @@ def train_dit(args):
 
             # Encode images to latents
             with torch.no_grad():
-                latents = vae.tokenize(images)
+                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    latents = vae.tokenize(images)
 
             # Encode text
             tokens = tokenizer(texts, max_length=77, padding="max_length", truncation=True)
             input_ids = tokens["input_ids"].to(device)
 
             with torch.no_grad():
-                text_embeddings = text_encoder(input_ids)
+                with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                    text_embeddings = text_encoder(input_ids)
+
+            # CFG: randomly drop text conditioning (use null embedding)
+            batch_size = text_embeddings.shape[0]
+            cfg_mask = torch.rand(batch_size, device=device) < CFG_DROPOUT
+            if cfg_mask.any():
+                # Replace with null embedding for CFG training
+                null_expanded = null_text_embedding.expand(batch_size, -1, -1)
+                text_embeddings = torch.where(
+                    cfg_mask.view(-1, 1, 1),
+                    null_expanded,
+                    text_embeddings
+                )
 
             # Sample noise
             noise = torch.randn_like(latents)
@@ -337,22 +366,30 @@ def train_dit(args):
             # Add noise
             noisy_latents = scheduler.add_noise(latents, noise, timesteps)
 
-            # Predict noise
-            noise_pred = dit(noisy_latents, timesteps, text_embeddings)
+            # Forward pass with mixed precision
+            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                # Predict noise
+                noise_pred = dit(noisy_latents, timesteps, text_embeddings)
 
-            # Loss
-            loss = F.mse_loss(noise_pred, noise)
-            loss = loss / GRADIENT_ACCUMULATION
+                # Loss
+                loss = F.mse_loss(noise_pred, noise)
+                loss = loss / GRADIENT_ACCUMULATION
 
-            loss.backward()
+            # Backward with scaler
+            scaler.scale(loss).backward()
             total_loss += loss.item() * GRADIENT_ACCUMULATION  # Unscale for logging
             current_loss = loss.item() * GRADIENT_ACCUMULATION
 
             # Compute gradient norm before clipping
             grad_norm = 0.0
             if (step + 1) % GRADIENT_ACCUMULATION == 0:
+                # Unscale before clipping
+                scaler.unscale_(optimizer)
                 grad_norm = torch.nn.utils.clip_grad_norm_(dit.parameters(), 1.0).item()
-                optimizer.step()
+
+                # Optimizer step with scaler
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
 
                 # Learning rate warmup
@@ -391,21 +428,37 @@ def train_dit(args):
                 dit.eval()
 
                 with torch.no_grad():
+                    num_samples = 4
+                    cfg_scale = 7.5  # Classifier-free guidance scale
+
                     # Sample from noise
-                    sample_latents = torch.randn(4, latent_channels, latent_size, latent_size, device=device)
+                    sample_latents = torch.randn(num_samples, latent_channels, latent_size, latent_size, device=device)
 
-                    # Dummy text embeddings
-                    sample_text = text_encoder(torch.randint(0, 50000, (4, 77), device=device))
+                    # Text embeddings (conditioned)
+                    sample_tokens = torch.randint(0, 50000, (num_samples, 77), device=device)
+                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        cond_embeddings = text_encoder(sample_tokens)
+                        # Null embeddings (unconditioned)
+                        uncond_embeddings = null_text_embedding.expand(num_samples, -1, -1)
 
-                    # Denoise (few steps for speed)
+                    # Denoise with CFG (few steps for speed)
                     for t in reversed(range(0, 1000, 50)):
-                        t_tensor = torch.full((4,), t, device=device, dtype=torch.long)
-                        noise_pred = dit(sample_latents, t_tensor, sample_text)
-                        sample_latents = scheduler.step(noise_pred, t, sample_latents)
+                        t_tensor = torch.full((num_samples,), t, device=device, dtype=torch.long)
+
+                        with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                            # Predict noise for both conditioned and unconditioned
+                            noise_pred_uncond = dit(sample_latents, t_tensor, uncond_embeddings)
+                            noise_pred_cond = dit(sample_latents, t_tensor, cond_embeddings)
+
+                            # CFG: combine predictions
+                            noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+
+                        sample_latents = scheduler.step(noise_pred.float(), t, sample_latents)
 
                     # Decode to images
-                    samples = vae.detokenize(sample_latents)
-                    samples = torch.clamp(samples, 0, 1)
+                    with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                        samples = vae.detokenize(sample_latents)
+                    samples = torch.clamp(samples.float(), 0, 1)
 
                     # Save
                     grid = make_grid(samples, nrow=2)
