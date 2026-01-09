@@ -157,9 +157,9 @@ class TextImageDataset(torch.utils.data.IterableDataset):
         skipped = 0
         for item in self.dataset:
             try:
-                # Try multiple common image keys
+                # Try multiple common image keys (case insensitive for LAION)
                 image = item.get(self.image_key) or item.get("img") or item.get("pixel_values")
-                text = item.get(self.text_key) or item.get("caption") or item.get("label", "")
+                text = item.get(self.text_key) or item.get("TEXT") or item.get("caption") or item.get("label", "")
 
                 # Handle URL-based datasets (like LAION)
                 if image is None:
