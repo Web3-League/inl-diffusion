@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inl-diffusion"
+version = "0.1.0"
+description = "Image generation with Integrator Neurons - Text-to-image diffusion model"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Pacific Prime", email = "contact@pacific-prime.ai"}
+]
+keywords = ["diffusion", "image-generation", "deep-learning", "pytorch", "text-to-image"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "tqdm>=4.66.0",
+    "pillow>=9.0.0",
+    "numpy>=1.21.0",
+    "safetensors>=0.4.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "datasets>=2.16.0",
+    "tensorboard>=2.15.0",
+    "wandb>=0.16.0",
+    "accelerate>=0.25.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Web3-League/inl-diffusion"
+Repository = "https://github.com/Web3-League/inl-diffusion"
+Issues = "https://github.com/Web3-League/inl-diffusion/issues"
+
+[project.scripts]
+inl-diffusion = "inl_diffusion.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inl_diffusion*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"

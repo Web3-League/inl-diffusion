@@ -15,7 +15,9 @@ Features:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Union
+from pathlib import Path
+import json
 import math
 
 
@@ -498,3 +500,85 @@ class INLVAE(nn.Module):
         x = self.decode(latents)
         # Denormalize from [-1, 1] to [0, 1]
         return (x + 1) / 2
+
+    def save_pretrained(self, save_directory: Union[str, Path]) -> None:
+        """Save model to directory with config and weights."""
+        save_dir = Path(save_directory)
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save config
+        config = {
+            "image_size": self.image_size,
+            "latent_dim": self.latent_dim,
+            "base_channels": self.encoder.base_channels,
+            "in_channels": self.encoder.in_channels,
+        }
+        with open(save_dir / "config.json", "w") as f:
+            json.dump(config, f, indent=2)
+
+        # Save weights as safetensors
+        try:
+            from safetensors.torch import save_file
+            save_file(self.state_dict(), save_dir / "model.safetensors")
+        except ImportError:
+            torch.save(self.state_dict(), save_dir / "model.pt")
+
+    @classmethod
+    def from_pretrained(cls, model_path: Union[str, Path], device: str = "cpu") -> "INLVAE":
+        """Load model from directory or checkpoint file."""
+        model_path = Path(model_path)
+
+        # Load from directory
+        if model_path.is_dir():
+            config_path = model_path / "config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+            else:
+                config = {}
+
+            # Create model
+            model = cls(
+                image_size=config.get("image_size", 256),
+                latent_dim=config.get("latent_dim", 4),
+                base_channels=config.get("base_channels", 128),
+                in_channels=config.get("in_channels", 3),
+            )
+
+            # Load weights
+            safetensors_path = model_path / "model.safetensors"
+            pt_path = model_path / "model.pt"
+
+            if safetensors_path.exists():
+                from safetensors.torch import load_file
+                state_dict = load_file(safetensors_path, device=device)
+            elif pt_path.exists():
+                state_dict = torch.load(pt_path, map_location=device)
+            else:
+                raise FileNotFoundError(f"No model weights found in {model_path}")
+
+            model.load_state_dict(state_dict)
+
+        # Load from .pt checkpoint file
+        elif model_path.suffix == ".pt":
+            checkpoint = torch.load(model_path, map_location=device)
+            if "config" in checkpoint:
+                config = checkpoint["config"]
+            else:
+                config = {}
+
+            model = cls(
+                image_size=config.get("image_size", 256),
+                latent_dim=config.get("latent_dim", 4),
+                base_channels=config.get("base_channels", 128),
+            )
+
+            if "model_state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["model_state_dict"])
+            else:
+                model.load_state_dict(checkpoint)
+
+        else:
+            raise ValueError(f"Unsupported model path: {model_path}")
+
+        return model
