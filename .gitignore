@@ -77,6 +77,8 @@ venv.bak/
 
 # Model checkpoints and weights
 checkpoints/
+vae_checkpoints/
+dit_checkpoints/
 *.pt
 *.pth
 *.ckpt
@@ -89,11 +91,13 @@ test_image.jpg
 *.jpg
 *.jpeg
 
-# Logs
+# Logs and TensorBoard
 logs/
+runs/
 *.log
 tensorboard/
 wandb/
+*.tfevents*
 
 # OS
 .DS_Store

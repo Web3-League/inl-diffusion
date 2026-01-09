@@ -123,12 +123,17 @@ def get_transform(image_size: int):
 class TextImageDataset(torch.utils.data.IterableDataset):
     """Streaming text-image dataset."""
 
-    def __init__(self, dataset_name: str, image_size: int = 256):
+    def __init__(self, dataset_name: str, image_size: int = 256, max_samples: int = None):
         self.transform = get_transform(image_size)
+        self.max_samples = max_samples
 
         print(f"Loading dataset: {dataset_name}")
 
         self.dataset = load_dataset(dataset_name, split="train", streaming=True)
+
+        if max_samples:
+            self.dataset = self.dataset.take(max_samples)
+            print(f"Limited to {max_samples} samples")
 
         # Find keys
         self.image_key = "image"
@@ -228,7 +233,7 @@ def train_dit(args):
         dataset = LocalDataset(args.local_data, transform=transform)
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
     else:
-        dataset = TextImageDataset(args.dataset, IMAGE_SIZE)
+        dataset = TextImageDataset(args.dataset, IMAGE_SIZE, max_samples=args.max_samples)
         dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
 
     # Optimizer
@@ -394,6 +399,8 @@ def main():
                         help="Maximum training steps")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate")
+    parser.add_argument("--max_samples", type=int, default=None,
+                        help="Limit dataset to N samples (faster loading)")
 
     args = parser.parse_args()
 
