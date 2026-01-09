@@ -300,6 +300,12 @@ def train_dit(args):
             with torch.no_grad():
                 latents = vae.tokenize(images)
 
+            # Debug: print shapes on first iteration
+            if step == 0:
+                print(f"[DEBUG] Images shape: {images.shape}")
+                print(f"[DEBUG] Latents shape: {latents.shape}")
+                print(f"[DEBUG] Expected latent size: {latent_size}x{latent_size}")
+
             # Encode text
             tokens = tokenizer(texts, max_length=77, padding="max_length", truncation=True)
             input_ids = tokens["input_ids"].to(device)
