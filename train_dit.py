@@ -142,10 +142,16 @@ class TextImageDataset(torch.utils.data.IterableDataset):
     def __iter__(self):
         for item in self.dataset:
             try:
-                image = item.get(self.image_key)
-                text = item.get(self.text_key) or item.get("caption") or ""
+                # Try multiple common image keys
+                image = item.get(self.image_key) or item.get("img") or item.get("pixel_values")
+                text = item.get(self.text_key) or item.get("caption") or item.get("label", "")
+
+                # Convert label to string if it's an int (e.g., CIFAR classes)
+                if isinstance(text, int):
+                    text = f"class {text}"
 
                 if image is None:
+                    print(f"Warning: No image found in item with keys: {list(item.keys())}")
                     continue
 
                 if hasattr(image, "convert"):
