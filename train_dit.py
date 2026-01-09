@@ -244,7 +244,39 @@ def train_dit(args):
     )
 
     # Dataset
-    if args.local_data:
+    if args.local_dataset:
+        # Use pre-downloaded HuggingFace dataset (much faster!)
+        from datasets import load_from_disk
+
+        print(f"Loading local dataset from {args.local_dataset}...")
+        hf_dataset = load_from_disk(args.local_dataset)
+        print(f"Dataset size: {len(hf_dataset)} samples")
+
+        transform = get_transform(IMAGE_SIZE)
+
+        class LocalHFDataset(torch.utils.data.Dataset):
+            def __init__(self, hf_ds, transform):
+                self.hf_ds = hf_ds
+                self.transform = transform
+
+            def __len__(self):
+                return len(self.hf_ds)
+
+            def __getitem__(self, idx):
+                item = self.hf_ds[idx]
+                image = item.get("image") or item.get("img")
+                text = item.get("text") or item.get("caption") or item.get("artist", "art")
+
+                if hasattr(image, "convert"):
+                    image = image.convert("RGB")
+                image = self.transform(image)
+
+                return {"image": image, "text": str(text)}
+
+        dataset = LocalHFDataset(hf_dataset, transform)
+        dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=8, pin_memory=True)
+
+    elif args.local_data:
         # Use torchvision ImageFolder with dummy captions
         from torchvision.datasets import ImageFolder
 
@@ -424,6 +456,8 @@ def main():
                         help="HuggingFace dataset name")
     parser.add_argument("--local_data", type=str, default=None,
                         help="Path to local image folder")
+    parser.add_argument("--local_dataset", type=str, default=None,
+                        help="Path to pre-downloaded HuggingFace dataset (from download_dataset.py)")
     parser.add_argument("--dit_size", type=str, default="L",
                         choices=["S", "B", "L", "XL", "XXL"],
                         help="DiT model size")
