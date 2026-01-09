@@ -153,6 +153,8 @@ class TextImageDataset(torch.utils.data.IterableDataset):
             return None
 
     def __iter__(self):
+        loaded = 0
+        skipped = 0
         for item in self.dataset:
             try:
                 # Try multiple common image keys
@@ -170,15 +172,25 @@ class TextImageDataset(torch.utils.data.IterableDataset):
                     text = f"class {text}"
 
                 if image is None:
+                    skipped += 1
+                    if skipped <= 5:
+                        print(f"[DEBUG] Skipped item {skipped}, keys: {list(item.keys())}")
                     continue
 
                 if hasattr(image, "convert"):
                     image = image.convert("RGB")
 
                 image = self.transform(image)
+                loaded += 1
+
+                if loaded <= 3:
+                    print(f"[DEBUG] Loaded image {loaded}, text: {text[:50] if text else 'N/A'}...")
 
                 yield {"image": image, "text": text}
-            except Exception:
+            except Exception as e:
+                skipped += 1
+                if skipped <= 5:
+                    print(f"[DEBUG] Exception: {e}")
                 continue
 
 
