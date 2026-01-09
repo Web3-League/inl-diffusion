@@ -128,8 +128,10 @@ class TextImageDataset(torch.utils.data.IterableDataset):
         self.max_samples = max_samples
 
         print(f"Loading dataset: {dataset_name}")
+        print(f"[DEBUG] Starting dataset load...")
 
         self.dataset = load_dataset(dataset_name, split="train", streaming=True)
+        print(f"[DEBUG] Dataset loaded, applying take() if needed...")
 
         if max_samples:
             self.dataset = self.dataset.take(max_samples)
