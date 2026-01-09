@@ -159,11 +159,12 @@ class INLDiTAttention(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = d_model // num_heads
-        self.kv_head_dim = d_model // num_kv_heads
+        # For GQA: KV heads use same head_dim but fewer heads
+        self.kv_dim = self.head_dim * num_kv_heads
 
         self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, self.kv_head_dim * num_kv_heads, bias=False)
-        self.v_proj = nn.Linear(d_model, self.kv_head_dim * num_kv_heads, bias=False)
+        self.k_proj = nn.Linear(d_model, self.kv_dim, bias=False)
+        self.v_proj = nn.Linear(d_model, self.kv_dim, bias=False)
         self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
         self.scale = self.head_dim ** -0.5
