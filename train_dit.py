@@ -139,6 +139,19 @@ class TextImageDataset(torch.utils.data.IterableDataset):
         self.image_key = "image"
         self.text_key = "text"
 
+    def _load_image_from_url(self, url: str):
+        """Download image from URL."""
+        import requests
+        from io import BytesIO
+        from PIL import Image
+
+        try:
+            response = requests.get(url, timeout=5)
+            response.raise_for_status()
+            return Image.open(BytesIO(response.content))
+        except Exception:
+            return None
+
     def __iter__(self):
         for item in self.dataset:
             try:
@@ -146,12 +159,17 @@ class TextImageDataset(torch.utils.data.IterableDataset):
                 image = item.get(self.image_key) or item.get("img") or item.get("pixel_values")
                 text = item.get(self.text_key) or item.get("caption") or item.get("label", "")
 
+                # Handle URL-based datasets (like LAION)
+                if image is None:
+                    url = item.get("URL") or item.get("url") or item.get("image_url")
+                    if url:
+                        image = self._load_image_from_url(url)
+
                 # Convert label to string if it's an int (e.g., CIFAR classes)
                 if isinstance(text, int):
                     text = f"class {text}"
 
                 if image is None:
-                    print(f"Warning: No image found in item with keys: {list(item.keys())}")
                     continue
 
                 if hasattr(image, "convert"):
