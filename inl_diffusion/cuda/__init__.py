@@ -18,6 +18,9 @@ from .triton_kernels import (
     fused_adaln_gate,
     fused_rmsnorm,
     fused_swiglu,
+    # Robotics Control Loop Pattern
+    fused_inl_adaln_residual,
+    RoboticsDiTLayer,
     HAS_TRITON
 )
 
@@ -36,6 +39,9 @@ __all__ = [
     'fused_adaln_gate',
     'fused_rmsnorm',
     'fused_swiglu',
+    # Robotics Control Loop
+    'fused_inl_adaln_residual',
+    'RoboticsDiTLayer',
     # MoE
     'FusedMoEIntegrator',
     'AdaptiveMoEIntegrator',
