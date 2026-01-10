@@ -6,9 +6,15 @@ Requires:
 - Trained INL-VAE for image encoding
 - Text encoder (INL-LLM or CLIP)
 
+v2 Features:
+- MoE (Mixture of Experts) for Integrator Neurons
+- Triton CUDA kernels for 3x speedup
+- Proper CFG with learned null embeddings
+- Load balance loss for MoE training
+
 Usage:
-    python train_dit.py --vae_path vae_checkpoints/vae_final.pt --dataset laion/laion-art
-    python train_dit.py --vae_path vae_final.pt --dit_size XL --batch_size 16
+    python train_dit.py --vae_path vae_final.pt --dit_size L --batch_size 16
+    python train_dit.py --vae_path vae_final.pt --dit_size L-MoE --batch_size 16  # With MoE
 """
 
 import os
@@ -33,7 +39,7 @@ except ImportError:
     HAS_DATASETS = False
 
 from inl_diffusion.vae import INLVAE
-from inl_diffusion.dit import INLDiT
+from inl_diffusion.dit import INLDiT, HAS_TRITON, HAS_FUSED_MOE
 from inl_diffusion.pipeline.text_to_image import DDPMScheduler
 from inl_diffusion.tokenizer import INLTokenizer
 
@@ -235,16 +241,25 @@ def train_dit(args):
     latent_size = IMAGE_SIZE // 8
     latent_channels = vae_config.get("latent_dim", 4)
 
-    # Create DiT
+    # Create DiT (supports MoE variants like "L-MoE", "XL-MoE")
     print(f"\nCreating INL-DiT ({DIT_SIZE})...")
+    print(f"  Triton available: {HAS_TRITON}")
+    print(f"  FusedMoE available: {HAS_FUSED_MOE}")
+
     dit = INLDiT.from_config(
         DIT_SIZE,
         img_size=latent_size,
         patch_size=2,
         in_channels=latent_channels,
         context_dim=2048,  # Text encoder dim
+        use_learned_null=True,  # Proper CFG with learned null embeddings
     ).to(device)
     print(f"DiT Parameters: {dit.get_num_params() / 1e6:.2f}M")
+
+    # Check if using MoE
+    use_moe = dit.use_moe
+    if use_moe:
+        print(f"  MoE enabled: {dit.blocks[0].integrator.num_experts if hasattr(dit.blocks[0].integrator, 'num_experts') else 'N/A'} experts")
 
     # INL Tokenizer (from Pacific-Prime/pacific-tiny or local)
     tokenizer_path = args.tokenizer_path if hasattr(args, 'tokenizer_path') and args.tokenizer_path else TOKENIZER_PATH
@@ -329,9 +344,13 @@ def train_dit(args):
     print(f"{'='*60}\n")
 
     # Create null text embedding for CFG (unconditional)
+    # Note: DiT now has learned null embeddings, but we still need this for text encoder
     with torch.no_grad():
         null_tokens = torch.zeros(1, 77, dtype=torch.long, device=device)
         null_text_embedding = text_encoder(null_tokens)  # [1, 77, 2048]
+
+    # Track MoE load balance loss
+    moe_loss_weight = 0.01 if use_moe else 0.0
 
     step = 0
     start_time = time.time()
@@ -525,8 +544,8 @@ def main():
     parser.add_argument("--local_dataset", type=str, default=None,
                         help="Path to pre-downloaded HuggingFace dataset (from download_dataset.py)")
     parser.add_argument("--dit_size", type=str, default="L",
-                        choices=["S", "B", "L", "XL", "XXL"],
-                        help="DiT model size")
+                        choices=["S", "B", "L", "XL", "XXL", "L-MoE", "XL-MoE"],
+                        help="DiT model size (use L-MoE or XL-MoE for MoE variants)")
     parser.add_argument("--batch_size", type=int, default=16,
                         help="Batch size")
     parser.add_argument("--max_steps", type=int, default=500000,

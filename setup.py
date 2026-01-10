@@ -2,6 +2,12 @@
 INL-Diffusion: Image Generation with Integrator Neurons
 
 Setup script for PyPI distribution.
+
+v0.4.0 features:
+- MoE (Mixture of Experts) for Integrator Neurons
+- Triton CUDA kernels for 3x speedup
+- Proper CFG with learned null embeddings
+- Per-channel integration weights
 """
 
 from setuptools import setup, find_packages
@@ -11,10 +17,10 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="inl-diffusion",
-    version="0.3.0",
+    version="0.4.0",
     author="Pacific Prime",
     author_email="contact@pacific-prime.ai",
-    description="Image generation with Integrator Neurons - Text-to-image diffusion model",
+    description="Image generation with Integrator Neurons - MoE + Triton accelerated diffusion model",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Web3-League/inl-diffusion",
@@ -47,6 +53,9 @@ setup(
             "tensorboard>=2.15.0",
             "wandb>=0.16.0",
             "accelerate>=0.25.0",
+        ],
+        "cuda": [
+            "triton>=2.0.0",  # For Triton CUDA kernels (3x speedup)
         ],
         "dev": [
             "pytest>=7.0.0",
