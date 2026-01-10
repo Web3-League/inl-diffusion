@@ -17,10 +17,10 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="inl-diffusion",
-    version="0.4.0",
+    version="0.5.0",
     author="Pacific Prime",
     author_email="contact@pacific-prime.ai",
-    description="Image generation with Integrator Neurons - MoE + Triton accelerated diffusion model",
+    description="Image generation with Integrator Neurons - MoE + CGGR Triton accelerated diffusion model",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Web3-League/inl-diffusion",
