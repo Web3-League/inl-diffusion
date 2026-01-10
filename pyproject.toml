@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inl-diffusion"
-version = "0.3.0"
-description = "Image generation with Integrator Neurons - Text-to-image diffusion model"
+version = "0.4.0"
+description = "Image generation with Integrator Neurons - MoE + Triton accelerated diffusion model"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [
@@ -43,6 +43,9 @@ train = [
     "tensorboard>=2.15.0",
     "wandb>=0.16.0",
     "accelerate>=0.25.0",
+]
+cuda = [
+    "triton>=2.0.0",
 ]
 dev = [
     "pytest>=7.0.0",
