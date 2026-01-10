@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inl-diffusion"
-version = "0.4.0"
+version = "0.6.0"
 description = "Image generation with Integrator Neurons - MoE + Triton accelerated diffusion model"
 readme = "README.md"
 license = {text = "Apache-2.0"}
