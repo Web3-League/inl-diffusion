@@ -339,5 +339,437 @@ def benchmark_inl_dynamics(batch_size: int = 1024, dim: int = 1152, n_iter: int 
     return fused_time, unfused_time
 
 
+# =============================================================================
+# FUSED ADALN-ZERO KERNEL (for DiT)
+# =============================================================================
+
+if HAS_TRITON:
+    @triton.jit
+    def _fused_adaln_kernel(
+        # Inputs
+        x_ptr,              # [batch, seq, dim] - normalized input
+        shift_ptr,          # [batch, dim] - shift parameter
+        scale_ptr,          # [batch, dim] - scale parameter
+        # Output
+        out_ptr,            # [batch, seq, dim]
+        # Dimensions
+        batch_size,
+        seq_len,
+        dim,
+        # Block size
+        BLOCK_SIZE: tl.constexpr
+    ):
+        """
+        Fused AdaLN: out = x * (1 + scale) + shift
+
+        Combines 3 ops into 1 kernel:
+        - Broadcast scale/shift from [batch, dim] to [batch, seq, dim]
+        - Multiply: x * (1 + scale)
+        - Add: + shift
+        """
+        pid = tl.program_id(0)
+
+        # Calculate indices
+        total_elements = batch_size * seq_len * dim
+        if pid * BLOCK_SIZE >= total_elements:
+            return
+
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < total_elements
+
+        # Decompose linear index to (batch, seq, d)
+        d = offsets % dim
+        seq_idx = (offsets // dim) % seq_len
+        batch_idx = offsets // (seq_len * dim)
+
+        # Load x
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+
+        # Load shift/scale (broadcast from [batch, dim])
+        param_offset = batch_idx * dim + d
+        shift = tl.load(shift_ptr + param_offset, mask=mask, other=0.0)
+        scale = tl.load(scale_ptr + param_offset, mask=mask, other=0.0)
+
+        # Fused AdaLN: x * (1 + scale) + shift
+        out = x * (1.0 + scale) + shift
+
+        # Store
+        tl.store(out_ptr + offsets, out, mask=mask)
+
+
+    @triton.jit
+    def _fused_adaln_gate_kernel(
+        # Inputs
+        x_ptr,              # [batch, seq, dim] - input
+        residual_ptr,       # [batch, seq, dim] - residual to add
+        gate_ptr,           # [batch, dim] - gating parameter
+        # Output
+        out_ptr,            # [batch, seq, dim]
+        # Dimensions
+        batch_size,
+        seq_len,
+        dim,
+        # Block size
+        BLOCK_SIZE: tl.constexpr
+    ):
+        """
+        Fused gated residual: out = residual + gate * x
+
+        For DiT: x = x + gate.unsqueeze(1) * attn_output
+        """
+        pid = tl.program_id(0)
+
+        total_elements = batch_size * seq_len * dim
+        if pid * BLOCK_SIZE >= total_elements:
+            return
+
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < total_elements
+
+        # Decompose
+        d = offsets % dim
+        batch_idx = offsets // (seq_len * dim)
+
+        # Load
+        x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+        residual = tl.load(residual_ptr + offsets, mask=mask, other=0.0)
+
+        # Load gate (broadcast from [batch, dim])
+        gate_offset = batch_idx * dim + d
+        gate = tl.load(gate_ptr + gate_offset, mask=mask, other=0.0)
+
+        # Fused: residual + gate * x
+        out = residual + gate * x
+
+        tl.store(out_ptr + offsets, out, mask=mask)
+
+
+    @triton.jit
+    def _fused_rmsnorm_kernel(
+        # Inputs
+        x_ptr,              # [batch, seq, dim]
+        weight_ptr,         # [dim]
+        # Output
+        out_ptr,            # [batch, seq, dim]
+        # Dimensions
+        batch_size,
+        seq_len,
+        dim,
+        eps,
+        # Block size
+        BLOCK_SIZE: tl.constexpr
+    ):
+        """
+        Fused RMSNorm: out = x * rsqrt(mean(x^2) + eps) * weight
+
+        Much faster than separate PyTorch ops.
+        """
+        pid = tl.program_id(0)  # One program per (batch, seq) position
+
+        if pid >= batch_size * seq_len:
+            return
+
+        batch_idx = pid // seq_len
+        seq_idx = pid % seq_len
+
+        # Base offset for this position
+        base_offset = batch_idx * seq_len * dim + seq_idx * dim
+
+        # Compute mean of squares (reduction)
+        sum_sq = 0.0
+        for block_start in range(0, dim, BLOCK_SIZE):
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < dim
+
+            x = tl.load(x_ptr + base_offset + offsets, mask=mask, other=0.0)
+            sum_sq += tl.sum(x * x, axis=0)
+
+        # RMS
+        rms = tl.sqrt(sum_sq / dim + eps)
+        inv_rms = 1.0 / rms
+
+        # Apply normalization and weight
+        for block_start in range(0, dim, BLOCK_SIZE):
+            offsets = block_start + tl.arange(0, BLOCK_SIZE)
+            mask = offsets < dim
+
+            x = tl.load(x_ptr + base_offset + offsets, mask=mask, other=0.0)
+            weight = tl.load(weight_ptr + offsets, mask=mask, other=0.0)
+
+            out = x * inv_rms * weight
+            tl.store(out_ptr + base_offset + offsets, out, mask=mask)
+
+
+def fused_adaln(
+    x: torch.Tensor,
+    shift: torch.Tensor,
+    scale: torch.Tensor
+) -> torch.Tensor:
+    """
+    Fused AdaLN: x * (1 + scale) + shift
+
+    Args:
+        x: [batch, seq, dim] - normalized input
+        shift: [batch, dim] - shift parameter
+        scale: [batch, dim] - scale parameter
+
+    Returns:
+        out: [batch, seq, dim]
+    """
+    if not HAS_TRITON or not x.is_cuda:
+        # PyTorch fallback
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+    batch_size, seq_len, dim = x.shape
+    out = torch.empty_like(x)
+
+    BLOCK_SIZE = 1024
+    total_elements = batch_size * seq_len * dim
+    grid = (triton.cdiv(total_elements, BLOCK_SIZE),)
+
+    _fused_adaln_kernel[grid](
+        x, shift, scale, out,
+        batch_size, seq_len, dim,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+
+    return out
+
+
+def fused_adaln_gate(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    gate: torch.Tensor
+) -> torch.Tensor:
+    """
+    Fused gated residual: residual + gate * x
+
+    Args:
+        x: [batch, seq, dim] - input (e.g., attention output)
+        residual: [batch, seq, dim] - residual connection
+        gate: [batch, dim] - gating parameter
+
+    Returns:
+        out: [batch, seq, dim]
+    """
+    if not HAS_TRITON or not x.is_cuda:
+        # PyTorch fallback
+        return residual + gate.unsqueeze(1) * x
+
+    batch_size, seq_len, dim = x.shape
+    out = torch.empty_like(x)
+
+    BLOCK_SIZE = 1024
+    total_elements = batch_size * seq_len * dim
+    grid = (triton.cdiv(total_elements, BLOCK_SIZE),)
+
+    _fused_adaln_gate_kernel[grid](
+        x, residual, gate, out,
+        batch_size, seq_len, dim,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+
+    return out
+
+
+def fused_rmsnorm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    Fused RMSNorm.
+
+    Args:
+        x: [batch, seq, dim]
+        weight: [dim]
+        eps: epsilon for numerical stability
+
+    Returns:
+        out: [batch, seq, dim]
+    """
+    if not HAS_TRITON or not x.is_cuda:
+        # PyTorch fallback
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + eps)
+        return x * rms * weight
+
+    batch_size, seq_len, dim = x.shape
+    out = torch.empty_like(x)
+
+    BLOCK_SIZE = min(1024, dim)
+    grid = (batch_size * seq_len,)
+
+    _fused_rmsnorm_kernel[grid](
+        x, weight, out,
+        batch_size, seq_len, dim, eps,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+
+    return out
+
+
+# =============================================================================
+# FUSED SWIGLU KERNEL
+# =============================================================================
+
+if HAS_TRITON:
+    @triton.jit
+    def _fused_swiglu_kernel(
+        # Inputs
+        gate_ptr,           # [batch, dim]
+        up_ptr,             # [batch, dim]
+        # Output
+        out_ptr,            # [batch, dim]
+        # Dimensions
+        n_elements,
+        BLOCK_SIZE: tl.constexpr
+    ):
+        """
+        Fused SwiGLU: silu(gate) * up
+
+        silu(x) = x * sigmoid(x)
+        """
+        pid = tl.program_id(0)
+        block_start = pid * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+
+        gate = tl.load(gate_ptr + offsets, mask=mask, other=0.0)
+        up = tl.load(up_ptr + offsets, mask=mask, other=0.0)
+
+        # SiLU: x * sigmoid(x)
+        silu_gate = gate * tl.sigmoid(gate)
+        out = silu_gate * up
+
+        tl.store(out_ptr + offsets, out, mask=mask)
+
+
+def fused_swiglu(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """
+    Fused SwiGLU activation: silu(gate) * up
+
+    Args:
+        gate: Gate projection output
+        up: Up projection output
+
+    Returns:
+        Activated output
+    """
+    if not HAS_TRITON or not gate.is_cuda:
+        return F.silu(gate) * up
+
+    out = torch.empty_like(gate)
+    n_elements = gate.numel()
+
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
+
+    _fused_swiglu_kernel[grid](
+        gate.view(-1), up.view(-1), out.view(-1),
+        n_elements,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+
+    return out.view_as(gate)
+
+
+# =============================================================================
+# BENCHMARK ALL FUSED KERNELS
+# =============================================================================
+
+def benchmark_all_fused(batch_size: int = 32, seq_len: int = 256, dim: int = 1152, n_iter: int = 100):
+    """Benchmark all fused kernels vs PyTorch."""
+    import time
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if not torch.cuda.is_available():
+        print("CUDA not available")
+        return
+
+    print(f"Benchmarking fused kernels (batch={batch_size}, seq={seq_len}, dim={dim})")
+    print("=" * 60)
+
+    # Test tensors
+    x = torch.randn(batch_size, seq_len, dim, device=device)
+    shift = torch.randn(batch_size, dim, device=device)
+    scale = torch.randn(batch_size, dim, device=device)
+    gate = torch.randn(batch_size, dim, device=device)
+    weight = torch.randn(dim, device=device)
+    up = torch.randn(batch_size, seq_len, dim, device=device)
+
+    # Warmup
+    for _ in range(10):
+        _ = fused_adaln(x, shift, scale)
+        _ = fused_adaln_gate(x, x, gate)
+        _ = fused_rmsnorm(x, weight)
+        _ = fused_swiglu(x, up)
+    torch.cuda.synchronize()
+
+    # Benchmark AdaLN
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = fused_adaln(x, shift, scale)
+    torch.cuda.synchronize()
+    fused_adaln_time = (time.perf_counter() - start) / n_iter * 1000
+
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    torch.cuda.synchronize()
+    pytorch_adaln_time = (time.perf_counter() - start) / n_iter * 1000
+
+    print(f"AdaLN:    Fused={fused_adaln_time:.3f}ms  PyTorch={pytorch_adaln_time:.3f}ms  Speedup={pytorch_adaln_time/fused_adaln_time:.2f}x")
+
+    # Benchmark Gated Residual
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = fused_adaln_gate(x, x, gate)
+    torch.cuda.synchronize()
+    fused_gate_time = (time.perf_counter() - start) / n_iter * 1000
+
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = x + gate.unsqueeze(1) * x
+    torch.cuda.synchronize()
+    pytorch_gate_time = (time.perf_counter() - start) / n_iter * 1000
+
+    print(f"Gate:     Fused={fused_gate_time:.3f}ms  PyTorch={pytorch_gate_time:.3f}ms  Speedup={pytorch_gate_time/fused_gate_time:.2f}x")
+
+    # Benchmark RMSNorm
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = fused_rmsnorm(x, weight)
+    torch.cuda.synchronize()
+    fused_rms_time = (time.perf_counter() - start) / n_iter * 1000
+
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+        _ = x * rms * weight
+    torch.cuda.synchronize()
+    pytorch_rms_time = (time.perf_counter() - start) / n_iter * 1000
+
+    print(f"RMSNorm:  Fused={fused_rms_time:.3f}ms  PyTorch={pytorch_rms_time:.3f}ms  Speedup={pytorch_rms_time/fused_rms_time:.2f}x")
+
+    # Benchmark SwiGLU
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = fused_swiglu(x, up)
+    torch.cuda.synchronize()
+    fused_swiglu_time = (time.perf_counter() - start) / n_iter * 1000
+
+    start = time.perf_counter()
+    for _ in range(n_iter):
+        _ = F.silu(x) * up
+    torch.cuda.synchronize()
+    pytorch_swiglu_time = (time.perf_counter() - start) / n_iter * 1000
+
+    print(f"SwiGLU:   Fused={fused_swiglu_time:.3f}ms  PyTorch={pytorch_swiglu_time:.3f}ms  Speedup={pytorch_swiglu_time/fused_swiglu_time:.2f}x")
+
+    print("=" * 60)
+
+
 if __name__ == "__main__":
     benchmark_inl_dynamics()
+    print()
+    benchmark_all_fused()
